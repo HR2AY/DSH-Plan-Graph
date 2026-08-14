@@ -1,0 +1,37 @@
+{
+  "name": "dsh-plan-graph",
+  "version": "0.1.0",
+  "description": "Plan Graph: an interactive flow graph of the session's tool calls and messages, as an out-of-tree DeepSeek Harness plugin bundle",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "prepare": "node scripts/build-client.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "client.body.js",
+    "cordis.patch.yml",
+    "scripts/build-client.mjs"
+  ],
+  "license": "MIT"
+}
