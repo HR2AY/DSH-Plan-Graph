@@ -1248,6 +1248,7 @@ return {
         if (want && detailsRegistration === null) {
           detailsRegistration = slots.inject('details', () => slots.register({
             name: 'details',
+            priority: -1,
           }, (props) => React.createElement(PlanGraphDetails, {
             useSession: props ? props.useSession : undefined,
             sessionId: props ? props.sessionId : undefined,
