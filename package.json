@@ -1,6 +1,6 @@
 {
   "name": "dsh-plan-graph",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Plan Graph: an interactive flow graph of the session's tool calls and messages, as an out-of-tree DeepSeek Harness plugin bundle",
   "type": "module",
   "main": "index.js",

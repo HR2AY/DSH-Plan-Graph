@@ -8,7 +8,9 @@ DeepSeek Harness 轨迹视图的客制化版本：以交互式流程图展示会
 
 该插件会在会话视图切换区中添加一个 **Plan Graph（计划图）** 标签页。其中包含支持平移和缩放的画布、按状态着色的节点卡片（检查、运行、等待、验证等类别，以及耗时和推理内容）、所选节点的详情面板，以及一组工具栏功能：**隐藏工具调用**、**按轮次分组**、**定位最新节点**和**合并到对话**（将图形渲染到对话页面真正的右侧边栏中）。
 
-浏览器端沿用了原始的 Plan Graph 动态插件代码（pkg-20），并封装为 Web 模块加载器的交接格式。它使用纯 JavaScript 编写，不包含任何构建时依赖。通过 Git 安装后，`prepare` 会运行 `scripts/build-client.mjs`，根据 `client.body.js` 重新生成 `client.js`。
+浏览器端沿用了原始的 Plan Graph 动态插件代码（pkg-22），并封装为 Web 模块加载器的交接格式。它使用纯 JavaScript 编写，不包含任何构建时依赖。通过 Git 安装后，`prepare` 会运行 `scripts/build-client.mjs`，根据 `client.body.js` 重新生成 `client.js`。
+
+自 0.1.0（pkg-20）以来的变更：pkg-21 —— 用户/指引节点显示「输入」、上下文节点显示「已完成」而非 idle；pkg-22 —— 拖动画布不再选中文本（`user-select: none` + mousedown 时 `preventDefault`）。
 
 ## 安装
 
@@ -28,7 +30,7 @@ dsh --profile demo
 
   然后重新运行 `add`。这项许可意味着允许该软件包在安装期间执行其代码。请固定到具体提交（`#<sha>`），并且只安装你信任的源代码。
 - **从本地检出目录安装**：`dsh plugin --profile demo add ./DSH-Plan-Graph`
-- **从压缩包安装**（不需要构建许可）：先在本目录运行 `pnpm pack`，然后运行 `dsh plugin --profile demo add ./dsh-plan-graph-0.1.0.tgz`
+- **从压缩包安装**（不需要构建许可）：先在本目录运行 `pnpm pack`，然后运行 `dsh plugin --profile demo add ./dsh-plan-graph-0.2.0.tgz`
 - **从 npm 安装**（发布后）：`dsh plugin --profile demo add dsh-plan-graph`
 
 无需启动即可验证该层：运行 `dsh --profile demo --dump-config` 后，应能看到一个 `# == dsh-plan-graph` 层。

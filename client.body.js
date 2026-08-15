@@ -1,13 +1,13 @@
 /**
- * Plan Graph — dynamic Cordis plugin, CLIENT half (plngr-2 / pkg-20).
+ * Plan Graph — dynamic Cordis plugin, CLIENT half.
  *
  * THIS IS THE EXPORTED SOURCE OF A DYNAMIC PLUGIN.
  * The live plugin is loaded through the harness's dynamic-plugin registry
  * (cordis_define code.client + cordis_run), NOT from this file. This file is a
- * faithful export of the running pkg-20 client code so another agent can edit
+ * faithful export of the running client code so another agent can edit
  * it; to apply changes, the edited file must be submitted as a new Package via
- * cordis_define (plugin.kind: existing, pluginId: plngr-2) and activated with
- * cordis_run mode: "update".
+ * cordis_define (plugin.kind: existing, pluginId: <当前 pluginId>) and activated
+ * with cordis_run mode: "update".
  *
  * The whole file body is the plain-JavaScript function body that returns a
  * Cordis Plugin ({ apply(ctx) { ... } }). No imports / TS / JSX allowed.
@@ -22,16 +22,21 @@
  * ctx.provide('chatNodeVisibility', ...), styles.insert(PG_CSS),
  * React.createElement, and guarded localStorage for two toggles.
  *
- * pkg-20 (current): removed the +/- zoom buttons (wheel zoom stays); added the
- * 【并入对话界面/返回tab页】 toggle. "并入对话界面" opens the real right
- * details column (ctx.layout.openDetails) and the graph renders there; the
- * center conversation column reflows automatically and the width is
- * drag-adjustable (native ui-layout grid). The plan-graph tab shows a
- * merged-screen while embedded. "返回tab页" closes the column and restores the
- * tab. The details occupant is registered ONLY while some session is embedded,
- * so the shipped tool-details panel keeps full fidelity otherwise. The chat
- * store's selection is mirrored from its persisted localStorage key so the
- * non-embedded details panel can still show tool details.
+ * Changelog:
+ * - pkg-22: dragging the canvas no longer selects text — mousedown calls
+ *   preventDefault() and .pg-canvas sets user-select: none.
+ * - pkg-21: user/steering nodes use status 'input' (显示「输入」), context
+ *   nodes use 'completed' (显示「已完成」) instead of 'idle'.
+ * - pkg-20: removed the +/- zoom buttons (wheel zoom stays); added the
+ *   【并入对话界面/返回tab页】 toggle. "并入对话界面" opens the real right
+ *   details column (ctx.layout.openDetails) and the graph renders there; the
+ *   center conversation column reflows automatically and the width is
+ *   drag-adjustable (native ui-layout grid). The plan-graph tab shows a
+ *   merged-screen while embedded. "返回tab页" closes the column and restores the
+ *   tab. The details occupant is registered ONLY while some session is embedded,
+ *   so the shipped tool-details panel keeps full fidelity otherwise. The chat
+ *   store's selection is mirrored from its persisted localStorage key so the
+ *   non-embedded details panel can still show tool details.
  *
  * --- Edit map (beautification entry points) ---
  * - NodeCard / PlanGraphView / GraphCanvas / DetailPanel: UI structure
@@ -621,7 +626,12 @@ const GraphCanvas = React.forwardRef(function GraphCanvas(props, ref) {
     return () => el.removeEventListener('wheel', handler)
   }, [])
   const dragRef = React.useRef(null)
-  const onMouseDown = (e) => { dragRef.current = { x: e.clientX, y: e.clientY, vx: props.view.x, vy: props.view.y } }
+  const onMouseDown = (e) => {
+    // preventDefault stops the browser from starting a text selection while
+    // panning (user-select: none on .pg-canvas is the CSS backstop).
+    e.preventDefault()
+    dragRef.current = { x: e.clientX, y: e.clientY, vx: props.view.x, vy: props.view.y }
+  }
   const onMouseMove = (e) => {
     const d = dragRef.current
     if (!d) return
@@ -757,6 +767,65 @@ function VerticalScrollbar(props) {
   }))
 }
 
+/** Horizontal twin of {@link VerticalScrollbar}: bottom rail, x-axis drag. */
+function HorizontalScrollbar(props) {
+  const trackRef = React.useRef(null)
+  const dragRef = React.useRef(null)
+  const trackWidth = Math.max(0, props.viewportWidth - 16)
+  const scrollable = props.maxScroll > 0 && trackWidth > 0
+  const thumbWidth = scrollable
+    ? Math.max(28, Math.min(trackWidth, trackWidth * props.viewportWidth / props.contentWidth))
+    : trackWidth
+  const travel = Math.max(0, trackWidth - thumbWidth)
+  const thumbLeft = scrollable ? (props.scroll / props.maxScroll) * travel : 0
+  const scrollFromThumbLeft = (left) => {
+    if (!scrollable || travel <= 0) return
+    props.onScroll(Math.max(0, Math.min(props.maxScroll, left / travel * props.maxScroll)))
+  }
+  const onTrackPointerDown = (e) => {
+    if (!scrollable || !trackRef.current) return
+    e.stopPropagation()
+    const rect = trackRef.current.getBoundingClientRect()
+    scrollFromThumbLeft(e.clientX - rect.left - thumbWidth / 2)
+  }
+  const onThumbPointerDown = (e) => {
+    if (!scrollable) return
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragRef.current = { pointerId: e.pointerId, x: e.clientX, left: thumbLeft }
+  }
+  const onThumbPointerMove = (e) => {
+    const drag = dragRef.current
+    if (!drag || drag.pointerId !== e.pointerId) return
+    e.stopPropagation()
+    scrollFromThumbLeft(drag.left + e.clientX - drag.x)
+  }
+  const onThumbPointerUp = (e) => {
+    if (!dragRef.current || dragRef.current.pointerId !== e.pointerId) return
+    e.stopPropagation()
+    dragRef.current = null
+    e.currentTarget.releasePointerCapture(e.pointerId)
+  }
+  return React.createElement('div', {
+    ref: trackRef,
+    className: 'pg-scrollbar pg-scrollbar-h' + (scrollable ? '' : ' pg-scrollbar-disabled'),
+    role: 'scrollbar',
+    'aria-label': props.label,
+    'aria-orientation': 'horizontal',
+    'aria-valuemin': 0,
+    'aria-valuemax': Math.round(props.maxScroll),
+    'aria-valuenow': Math.round(props.scroll),
+    onPointerDown: onTrackPointerDown,
+  }, React.createElement('div', {
+    className: 'pg-scrollbar-thumb',
+    style: { width: thumbWidth + 'px', transform: 'translateX(' + thumbLeft + 'px)' },
+    onPointerDown: onThumbPointerDown,
+    onPointerMove: onThumbPointerMove,
+    onPointerUp: onThumbPointerUp,
+    onPointerCancel: onThumbPointerUp,
+  }))
+}
+
 function PlanGraphView(props) {
   const useSession = props.useSession
   const toggleStore = props.toggleStore
@@ -771,7 +840,9 @@ function PlanGraphView(props) {
   const [expandedTurns, setExpandedTurns] = React.useState(() => new Set())
   const [selectedId, setSelectedId] = React.useState(null)
   const [view, setView] = React.useState({ x: 24, y: 24, scale: 1 })
+  const [viewportWidth, setViewportWidth] = React.useState(1200)
   const [viewportHeight, setViewportHeight] = React.useState(700)
+  const [followLatest, setFollowLatest] = React.useState(false)
   const canvasRef = React.useRef(null)
   React.useEffect(() => toggleStore.subscribe(() => setHideTools(toggleStore.get())), [])
   React.useEffect(() => turnStore.subscribe(() => setGroupByTurn(turnStore.get())), [])
@@ -783,7 +854,10 @@ function PlanGraphView(props) {
   React.useEffect(() => {
     const el = canvasRef.current
     if (!el) return
-    const update = () => setViewportHeight(el.clientHeight || 700)
+    const update = () => {
+      setViewportWidth(el.clientWidth || 1200)
+      setViewportHeight(el.clientHeight || 700)
+    }
     update()
     if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(update)
@@ -791,7 +865,7 @@ function PlanGraphView(props) {
     return () => observer.disconnect()
   }, [graph])
   const selected = selectedId ? (graph.nodes.find((n) => n.id === selectedId) || null) : null
-  const locateLatest = () => {
+  const centerOnLatest = () => {
     const el = canvasRef.current
     if (!el || !graph.nodes.length) return
     let latest = graph.nodes[0]
@@ -807,6 +881,12 @@ function PlanGraphView(props) {
       y: ch / 2 - (latest.y + (latest.h || 76) / 2) * current.scale,
     }))
   }
+  // Follow-latest: while the toggle is on, re-center on the newest node every
+  // time the graph changes (new nodes keep arriving). Toggling it on also
+  // jumps once, replacing the old one-shot "locate latest" button.
+  React.useEffect(() => {
+    if (followLatest) centerOnLatest()
+  }, [followLatest, graph])
   const applyGroupByTurn = (v) => {
     turnStore.set(v)
     if (!v) setExpandedTurns(new Set())
@@ -825,8 +905,11 @@ function PlanGraphView(props) {
     }
   }
   const turnCount = groupByTurn ? graph.nodes.filter((n) => n.type === 'turn').length : 0
+  const contentWidth = graph.width * view.scale
   const contentHeight = graph.height * view.scale
+  const maxScrollX = Math.max(0, contentWidth - viewportWidth)
   const maxScrollY = Math.max(0, contentHeight - viewportHeight)
+  const scrollX = Math.min(maxScrollX, Math.max(0, -view.x))
   const scrollY = Math.min(maxScrollY, Math.max(0, -view.y))
   const canvasArea = graph.nodes.length === 0
     ? React.createElement('div', { className: 'pg-empty' },
@@ -834,6 +917,16 @@ function PlanGraphView(props) {
         React.createElement('div', null, t('empty.hint')))
     : React.createElement('div', { className: 'pg-canvas-wrap' },
         React.createElement(GraphCanvas, { ref: canvasRef, graph, view, onView: setView, selectedId, onSelect: handleNodeClick, t }),
+        // Turn-fold mode lays expanded members out horizontally, so a bottom
+        // rail scrolls the band without drag-panning.
+        groupByTurn ? React.createElement(HorizontalScrollbar, {
+          viewportWidth,
+          contentWidth,
+          maxScroll: maxScrollX,
+          scroll: scrollX,
+          onScroll: (next) => setView((v) => ({ ...v, x: -next })),
+          label: t('toolbar.scrollH'),
+        }) : null,
         React.createElement(VerticalScrollbar, {
           viewportHeight,
           contentHeight,
@@ -851,7 +944,8 @@ function PlanGraphView(props) {
         (hideTools ? '✓ ' : '') + t('toolbar.hideTools')),
       React.createElement('button', { className: 'pg-btn' + (groupByTurn ? ' pg-btn-on' : ''), title: t('toolbar.groupTurns'), onClick: () => applyGroupByTurn(!groupByTurn) },
         (groupByTurn ? '✓ ' : '') + t('toolbar.groupTurns')),
-      React.createElement('button', { className: 'pg-btn', onClick: locateLatest }, t('toolbar.latest')),
+      React.createElement('button', { className: 'pg-btn' + (followLatest ? ' pg-btn-on' : ''), title: t('toolbar.followLatest'), onClick: () => setFollowLatest((v) => !v) },
+        (followLatest ? '✓ ' : '') + t('toolbar.followLatest')),
       React.createElement('button', { className: 'pg-btn pg-btn-embed' + (embedded ? ' pg-btn-on' : ''), title: embedLabel, onClick: () => onEmbedToggle(!embedded) }, embedLabel),
       React.createElement('span', { className: 'pg-count' },
         groupByTurn
@@ -1029,8 +1123,9 @@ const EN_DICT = {
   'empty.hint': 'This session has no tool calls or messages to visualize yet.',
   'toolbar.hideTools': 'Hide tool calls',
   'toolbar.groupTurns': 'Group by turn',
-  'toolbar.latest': 'Locate latest',
+  'toolbar.followLatest': 'Follow latest',
   'toolbar.scroll': 'Scroll',
+  'toolbar.scrollH': 'Horizontal scroll',
   'toolbar.nodes': 'nodes',
   'toolbar.turns': '{n} turns',
   'status.active': 'active', 'status.waiting': 'waiting', 'status.completed': 'completed',
@@ -1063,8 +1158,9 @@ const ZH_DICT = {
   'empty.hint': '本会话还没有可可视化的工具调用或消息。',
   'toolbar.hideTools': '隐藏工具调用',
   'toolbar.groupTurns': '按 Turn 折叠',
-  'toolbar.latest': '定位至最新',
+  'toolbar.followLatest': '跟踪最新',
   'toolbar.scroll': '上下滚动',
+  'toolbar.scrollH': '横向滚动',
   'toolbar.nodes': '个节点',
   'toolbar.turns': '{n} 轮',
   'status.active': '执行中', 'status.waiting': '等待中', 'status.completed': '已完成',
@@ -1101,7 +1197,7 @@ const PG_CSS = `
 .pg-count { margin-left: auto; color: var(--dsw-alias-label-secondary); font-size: 12px; }
 .pg-body { display: flex; flex: 1; min-height: 0; }
 .pg-canvas-wrap { position: relative; flex: 1; min-width: 0; display: flex; }
-.pg-canvas { flex: 1; min-width: 0; overflow: hidden; position: relative; cursor: grab; background-color: var(--dsw-alias-bg-base); background-image: linear-gradient(var(--dsw-alias-border-l1) 1px, transparent 1px), linear-gradient(90deg, var(--dsw-alias-border-l1) 1px, transparent 1px); }
+.pg-canvas { flex: 1; min-width: 0; overflow: hidden; position: relative; cursor: grab; user-select: none; -webkit-user-select: none; background-color: var(--dsw-alias-bg-base); background-image: linear-gradient(var(--dsw-alias-border-l1) 1px, transparent 1px), linear-gradient(90deg, var(--dsw-alias-border-l1) 1px, transparent 1px); }
 .pg-canvas:active { cursor: grabbing; }
 .pg-svg { display: block; }
 .pg-scrollbar { position: absolute; right: 5px; top: 8px; bottom: 8px; width: 10px; border-radius: 5px; background: color-mix(in srgb, var(--dsw-alias-label-secondary) 10%, transparent); z-index: 2; cursor: pointer; touch-action: none; }
@@ -1110,6 +1206,8 @@ const PG_CSS = `
 .pg-scrollbar-thumb:active { cursor: grabbing; background: var(--dsw-alias-brand-primary); }
 .pg-scrollbar-disabled { opacity: 0.35; cursor: default; }
 .pg-scrollbar-disabled .pg-scrollbar-thumb { cursor: default; }
+.pg-scrollbar-h { right: auto; left: 8px; top: auto; bottom: 5px; width: auto; height: 10px; }
+.pg-scrollbar-h .pg-scrollbar-thumb { top: 1px; left: 0; width: 8px; min-width: 28px; height: 8px; min-height: 0; }
 .pg-empty { margin: auto; color: var(--dsw-alias-label-secondary); text-align: center; padding: 24px; }
 .pg-node { box-sizing: border-box; width: 210px; height: 76px; border: 1px solid var(--dsw-alias-border-l2); border-left: 3px solid var(--pg-color); border-radius: 7px; background: var(--dsw-alias-bg-layer-1); padding: 7px 9px 6px; display: flex; flex-direction: column; gap: 3px; cursor: pointer; overflow: hidden; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease; }
 .pg-node:hover { border-color: var(--pg-color); box-shadow: 0 3px 10px rgba(15, 23, 42, 0.14); transform: translateY(-1px); }
@@ -1207,19 +1305,34 @@ return {
     const interval = timer ? ((fn, ms) => timer.interval(fn, ms)) : null
 
     const locale = ctx.get('locale')
+    // Unique per-apply namespace: the locale registry is process-wide and a
+    // previous session's registration of the stable 'plan-graph' namespace
+    // would otherwise throw "already has locale" (a namespace has one owner).
+    // Each run owns its dicts and cleans them up on unload.
+    const ns = 'plan-graph.' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)
     if (locale) {
-      ctx.effect(() => locale.register('plan-graph', 'zh', ZH_DICT), 'plan-graph: zh dict')
-      ctx.effect(() => locale.register('plan-graph', 'en', EN_DICT), 'plan-graph: en dict')
+      ctx.effect(() => locale.register(ns, 'zh', ZH_DICT), 'plan-graph: zh dict')
+      ctx.effect(() => locale.register(ns, 'en', EN_DICT), 'plan-graph: en dict')
     }
-    const t = locale ? locale.bind('plan-graph') : ((key) => key)
+    const t = locale ? locale.bind(ns) : ((key) => key)
 
-    ctx.effect(() => ctx.provide('chatNodeVisibility', {
-      isNodeVisible: (node) => {
-        if (!toggleStore.get()) return true
-        if (node == null) return true
-        return node.kind !== 'tool-call'
-      },
-    }), 'plan-graph: chatNodeVisibility')
+    // A stale provider from a previous session would make ctx.provide throw
+    // ("service already registered"); the optional service is a no-op upgrade,
+    // so skip providing when one is already live.
+    ctx.effect(() => {
+      try {
+        return ctx.provide('chatNodeVisibility', {
+          isNodeVisible: (node) => {
+            if (!toggleStore.get()) return true
+            if (node == null) return true
+            return node.kind !== 'tool-call'
+          },
+        })
+      } catch (e) {
+        console.log('[plan-graph] chatNodeVisibility already provided; skipped')
+        return () => {}
+      }
+    }, 'plan-graph: chatNodeVisibility')
 
     const slots = ctx.get('slots')
     if (slots) {

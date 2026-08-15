@@ -8,7 +8,9 @@ another version of the DeepSeek Harness trajectory (DIY): an interactive flow gr
 
 The plugin adds a **Plan Graph** tab to the session view ring: a pan/zoom canvas with status-colored node cards (inspect / run / wait / verify classes, durations, reasoning), a details panel for the selected node, and a toolbar with **hide tool calls**, **group by turn**, **locate latest**, and **merge into conversation** (renders the graph in the real right sidebar of the conversation page).
 
-The browser half is the original plan-graph dynamic-plugin code (pkg-20), wrapped in the web module loader's handoff format — plain JavaScript with zero build-time dependencies. `scripts/build-client.mjs` (run by `prepare` after a git install) regenerates `client.js` from `client.body.js`.
+The browser half is the original plan-graph dynamic-plugin code (pkg-22), wrapped in the web module loader's handoff format — plain JavaScript with zero build-time dependencies. `scripts/build-client.mjs` (run by `prepare` after a git install) regenerates `client.js` from `client.body.js`.
+
+Changes since 0.1.0 (pkg-20): pkg-21 — user/steering nodes display「输入」(input) and context nodes「已完成」(completed) instead of idle; pkg-22 — dragging the canvas no longer selects text (`user-select: none` + `preventDefault` on mousedown).
 
 ## Install
 
@@ -28,7 +30,7 @@ dsh --profile demo
 
   then re-run the `add`. That allowance is permission to execute this package's code on your machine at install time — pin a commit (`#<sha>`) and only install sources you trust.
 - **From a local checkout**: `dsh plugin --profile demo add ./DSH-Plan-Graph`
-- **From a tarball** (no build permission needed): `pnpm pack` in this directory, then `dsh plugin --profile demo add ./dsh-plan-graph-0.1.0.tgz`
+- **From a tarball** (no build permission needed): `pnpm pack` in this directory, then `dsh plugin --profile demo add ./dsh-plan-graph-0.2.0.tgz`
 - **From npm** (once published): `dsh plugin --profile demo add dsh-plan-graph`
 
 Verify the layer without booting: `dsh --profile demo --dump-config` shows a `# == dsh-plan-graph` layer.
