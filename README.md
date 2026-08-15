@@ -2,6 +2,8 @@
 
 English | [中文](README.zh.md)
 
+![DSH Plan Graph preview](assets/plan-graph-preview.png)
+
 another version of the DeepSeek Harness trajectory (DIY): an interactive flow graph of a session's tool calls and messages, distributed as an out-of-tree [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin bundle.
 
 The plugin adds a **Plan Graph** tab to the session view ring: a pan/zoom canvas with status-colored node cards (inspect / run / wait / verify classes, durations, reasoning), a details panel for the selected node, and a toolbar with **hide tool calls**, **group by turn**, **locate latest**, and **merge into conversation** (renders the graph in the real right sidebar of the conversation page).

@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文
 
+![DSH Plan Graph 预览](assets/plan-graph-preview.png)
+
 DeepSeek Harness 轨迹视图的客制化版本：以交互式流程图展示会话中的工具调用和消息，并作为一个独立于主仓库的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件包进行分发。
 
 该插件会在会话视图切换区中添加一个 **Plan Graph（计划图）** 标签页。其中包含支持平移和缩放的画布、按状态着色的节点卡片（检查、运行、等待、验证等类别，以及耗时和推理内容）、所选节点的详情面板，以及一组工具栏功能：**隐藏工具调用**、**按轮次分组**、**定位最新节点**和**合并到对话**（将图形渲染到对话页面真正的右侧边栏中）。
