@@ -18,13 +18,58 @@
  * It appears as a tab in the session header ring of the Web GUI at
  * http://127.0.0.1:3080 and its body is the PlanGraphView component
  * (registered component receives the slot standard props: useSession,
- * sessionId, ...). The client half uses only: ctx.get('locale'/'slots'),
+ * sessionId, ...). The client half uses only: ctx.get('locale'/'slots'/'layout'/'timer'),
  * ctx.provide('chatNodeVisibility', ...), styles.insert(PG_CSS),
- * React.createElement, and guarded localStorage for two toggles.
+ * React.createElement, and guarded localStorage for toggles and favorites.
  *
  * Changelog:
+ * - pkg-9: drop the 定位到图内 context-menu item and the details-panel ★
+ *   favorite button (favorites are managed from the context menu only);
+ *   favorites entries store the node seq and clicking an entry falls back to
+ *   the chat row by seq/callId when its graph node is gone (partial assistant
+ *   finished, windowed node paged out), instead of doing nothing.
+ * - pkg-8: the chatNodeVisibility service gains the subscribe(fn) method its
+ *   consumer (ui-conversation) calls during Chat render — without it the
+ *   conversation page went blank when switching back to Chat
+ *   ("subscribe is not a function" from `ctx.get('chatNodeVisibility')?.subscribe(fn)`).
+ * - pkg-7: the node context menu reorders so 定位至对话区 (locate-in-chat, F3,
+ *   tool-call nodes only) sits right below 加入/移出收藏夹, after 定位到图内;
+ *   its zh label is now 定位至对话区.
+ * - pkg-6: the favorites popover renders centered at the bottom of the view
+ *   (not anchored under the toolbar), and the per-entry × remove button is
+ *   dropped — removal goes through the node context menu and the details ★
+ *   toggle instead.
+ * - pkg-5: favorites UI reverted to the dropdown-popover form (toolbar button
+ *   opens a panel of colored kind tiles + summary + locate pin, plus the ★
+ *   favorite button on the details panel) while keeping the pkg-3/pkg-4
+ *   favorites machinery: per-session localStorage persistence, dedupe, 100-cap,
+ *   click-to-locate, drag-to-add (drop onto the toolbar favorites control), and
+ *   the context-menu add/remove.
+ * - pkg-4: the graph flash highlight clears itself through the CSS animation's
+ *   animationend instead of a browser timer — the dynamic client half withholds
+ *   setTimeout/clearTimeout (Guard redirect), which crashed the pkg-3 render.
+ * - pkg-3: favorites bar + node context menu + locate-in-chat.
+ *   F1 favorites: collapsible bottom bar (per-session, persisted as JSON in
+ *   localStorage 'dsh.plan-graph.fav.<sessionId>', dedupe by node id, capped
+ *   at 100); drag a node onto the bar to add (pointer drag distinguishes a
+ *   click from a drag, canvas pan untouched); click an entry to center the
+ *   graph on that node with a flash highlight.
+ *   F2 context menu: right-click a node opens a fixed-position menu (clamped
+ *   to the viewport) with 在对话中定位 / 定位到图内 / 加入-移出收藏夹 / 复制节点信息
+ *   / 查看详情; closed by outside click, Escape, canvas interaction, or
+ *   another right-click.
+ *   F3 locate-in-chat: maps a tool-call node's callId to the chat row key
+ *   through snapshot.chat.nodes (kind 'tool-call', id === String(callId)),
+ *   then waits for the [data-chat-flow-key] row via MutationObserver,
+ *   scrollIntoView + a flash class; 10s timeout silently falls back to
+ *   in-graph locate. Observer/timers are owned by ctx.effect and disposed on
+ *   plugin unload; an upstream 'chatLocate' optional service is preferred
+ *   when a deployment provides one.
  * - pkg-22: dragging the canvas no longer selects text — mousedown calls
  *   preventDefault() and .pg-canvas sets user-select: none.
+ * - details-slot priority fix: register the merged-view 'details' occupant
+ *   at priority -1 so "Merge into conversation" wins the single slot
+ *   (external PR HR2AY/DSH-Plan-Graph#1).
  * - pkg-21: user/steering nodes use status 'input' (显示「输入」), context
  *   nodes use 'completed' (显示「已完成」) instead of 'idle'.
  * - pkg-20: removed the +/- zoom buttons (wheel zoom stays); added the
@@ -95,6 +140,141 @@ function contentText(content) {
     if (b && b.type === 'text' && typeof b.text === 'string' && b.text !== '') parts.push(b.text)
   }
   return parts.join('\n').slice(0, 2000)
+}
+
+function cssEscape(s) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') {
+    try { return CSS.escape(s) } catch (e) {}
+  }
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&')
+}
+
+/** Accent color of a projected node, mirroring NodeCard's palette. */
+function nodeAccent(node) {
+  if (!node) return '#64748b'
+  let accent = STATUS_COLORS[node.status] || STATUS_COLORS.idle
+  if (node.type === 'assistant') accent = '#8b5cf6'
+  else if (node.type === 'user') accent = '#3b82f6'
+  else if (node.kind === 'tool') accent = '#64748b'
+  else if (node.kind === 'context') accent = '#10b981'
+  return accent
+}
+
+/** Map a tool-call node to its chat row key through the shared snapshot. */
+function nodeKeyByCallId(snapshot, callId) {
+  if (!snapshot || !snapshot.chat || !snapshot.chat.nodes || callId == null) return null
+  const want = String(callId)
+  const store = snapshot.chat.nodes
+  let values = []
+  try { values = typeof store.values === 'function' ? store.values() : [] } catch (e) {}
+  for (let i = 0; i < values.length; i++) {
+    const node = values[i]
+    if (node && node.kind === 'tool-call' && String(node.id) === want && typeof node.key === 'string') {
+      return node.key
+    }
+  }
+  return null
+}
+
+/** Map an assistant message seq to its chat row key (finalNode.seq mirrors the graph node seq). */
+function nodeKeyByAssistantSeq(snapshot, seq) {
+  if (!snapshot || !snapshot.chat || !snapshot.chat.nodes || seq == null) return null
+  const store = snapshot.chat.nodes
+  let values = []
+  try { values = typeof store.values === 'function' ? store.values() : [] } catch (e) {}
+  for (let i = 0; i < values.length; i++) {
+    const node = values[i]
+    if (!node || node.kind !== 'assistant-step') continue
+    const d = node.data
+    if (d && d.finalNode && d.finalNode.seq === seq && typeof node.key === 'string') return node.key
+  }
+  return null
+}
+
+/** Per-session favorites store: JSON array in localStorage, guarded fallback. */
+function makeFavStore(sessionId) {
+  const key = 'dsh.plan-graph.fav.' + (sessionId || '')
+  const CAP = 100
+  let items = []
+  const listeners = new Set()
+  const read = () => {
+    try {
+      if (typeof localStorage === 'undefined') return []
+      const raw = localStorage.getItem(key)
+      if (!raw) return []
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return []
+      return parsed
+        .filter((it) => it && typeof it.id === 'string')
+        .slice(0, CAP)
+    } catch (e) { return [] }
+  }
+  const write = (list) => {
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem(key, JSON.stringify(list.slice(0, CAP)))
+    } catch (e) {}
+  }
+  items = read()
+  return {
+    get: () => items,
+    has: (id) => items.some((it) => it.id === id),
+    add: (entry) => {
+      const next = [entry].concat(items.filter((it) => it.id !== entry.id)).slice(0, CAP)
+      items = next
+      write(next)
+      listeners.forEach((fn) => fn())
+    },
+    remove: (id) => {
+      const next = items.filter((it) => it.id !== id)
+      items = next
+      write(next)
+      listeners.forEach((fn) => fn())
+    },
+    subscribe: (fn) => { listeners.add(fn); return () => listeners.delete(fn) },
+  }
+}
+
+/** Locate-in-chat locator: MutationObserver wait + scroll + flash, timer-driven. */
+function createLocator(timer) {
+  let observer = null
+  let clearTimer = null
+  let cleanup = null
+  const dispose = () => {
+    if (observer) { try { observer.disconnect() } catch (e) {} observer = null }
+    if (clearTimer) { try { clearTimer() } catch (e) {} clearTimer = null }
+    if (cleanup) { try { cleanup() } catch (e) {} cleanup = null }
+  }
+  const settle = (el) => {
+    dispose()
+    try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }) } catch (e) {}
+    let cls = null
+    try { el.classList.add('pg-locate-flash'); cls = el } catch (e) {}
+    cleanup = () => { if (cls) { try { cls.classList.remove('pg-locate-flash') } catch (e) {} } }
+    if (timer && cls) {
+      clearTimer = timer.timeout(() => { cleanup(); cleanup = null; clearTimer = null }, 1200)
+    }
+  }
+  const flash = (key, onTimeout) => {
+    dispose()
+    const sel = '[data-chat-flow-key="' + cssEscape(key) + '"]'
+    let target = null
+    try { target = document.querySelector(sel) } catch (e) {}
+    if (target) { settle(target); return }
+    if (typeof MutationObserver === 'undefined' || typeof document === 'undefined') {
+      if (onTimeout) onTimeout()
+      return
+    }
+    observer = new MutationObserver(() => {
+      let found = null
+      try { found = document.querySelector(sel) } catch (e) {}
+      if (found) settle(found)
+    })
+    try { observer.observe(document.body, { childList: true, subtree: true }) } catch (e) { observer = null }
+    if (timer) {
+      clearTimer = timer.timeout(() => { dispose(); if (onTimeout) onTimeout() }, 10000)
+    }
+  }
+  return { flash, dispose }
 }
 
 function projectToolBlock(block) {
@@ -553,11 +733,7 @@ function NodeCard(props) {
   const t = props.t
   const isTurn = node.type === 'turn'
   const isContext = node.kind === 'context'
-  let accent = STATUS_COLORS[node.status] || STATUS_COLORS.idle
-  if (node.type === 'assistant') accent = '#8b5cf6'
-  else if (node.type === 'user') accent = '#3b82f6'
-  else if (node.kind === 'tool') accent = '#64748b'
-  else if (isContext) accent = '#10b981'
+  const accent = nodeAccent(node)
   const cls = ['pg-node']
   if (isTurn) cls.push('pg-node-turn')
   if (node.type === 'assistant') cls.push('pg-node-assistant')
@@ -568,6 +744,7 @@ function NodeCard(props) {
     cls.push('pg-node-context')
   }
   if (props.selected) cls.push('pg-node-selected')
+  if (props.flashId === node.id) cls.push('pg-node-flash')
   const glyph = isContext ? 'CTX' : (TYPE_GLYPHS[node.type] || '?')
   const title = nodeTitle(node, t)
   const summary = isTurn ? turnSummary(node, t) : (node.summary || '—')
@@ -591,11 +768,59 @@ function NodeCard(props) {
       timeLabel ? React.createElement('span', { className: 'pg-node-time' }, timeLabel) : null,
     ),
   ]
+  const dragRef = React.useRef(null)
+  const suppressClickRef = React.useRef(false)
+  const onPointerDown = (e) => {
+    // Left button only; stop the canvas pan from starting and text selection.
+    if (e.button !== 0) return
+    e.stopPropagation()
+    e.preventDefault()
+    dragRef.current = { x: e.clientX, y: e.clientY, moved: false, pointerId: e.pointerId }
+    try { e.currentTarget.setPointerCapture(e.pointerId) } catch (err) {}
+  }
+  const onPointerMove = (e) => {
+    const d = dragRef.current
+    if (!d) return
+    if (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5) {
+      d.moved = true
+      props.onDragStart(node.id)
+    }
+    if (d.moved) props.onDragMove(e.clientX, e.clientY)
+  }
+  const onPointerUp = (e) => {
+    const d = dragRef.current
+    if (!d) return
+    dragRef.current = null
+    try { e.currentTarget.releasePointerCapture(e.pointerId) } catch (err) {}
+    if (d.moved) {
+      suppressClickRef.current = true
+      props.onDragEnd(node.id, e.clientX, e.clientY)
+      e.preventDefault()
+      e.stopPropagation()
+    }
+  }
+  const onContextMenu = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    props.onContextMenu(e, node)
+  }
+  const onClick = (e) => {
+    if (suppressClickRef.current) { suppressClickRef.current = false; return }
+    e.stopPropagation()
+    props.onSelect(node.id)
+  }
   const common = {
     xmlns: 'http://www.w3.org/1999/xhtml',
     className: cls.join(' '),
     style: { '--pg-color': accent },
-    onClick: (e) => { e.stopPropagation(); props.onSelect(node.id) },
+    onClick,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onContextMenu,
+    // The flash animation (0.6s x 2 iterations) clears itself through
+    // animationend — the dynamic client half withholds browser timer globals.
+    onAnimationEnd: (e) => { if (props.flashId === node.id && props.onFlashEnd) props.onFlashEnd(node.id) },
   }
   return React.createElement('div', common, ...children)
 }
@@ -610,6 +835,7 @@ const GraphCanvas = React.forwardRef(function GraphCanvas(props, ref) {
     const handler = (e) => {
       e.preventDefault()
       e.stopPropagation()
+      if (props.onCanvasInteract) props.onCanvasInteract()
       const rect = el.getBoundingClientRect()
       const cx = e.clientX - rect.left
       const cy = e.clientY - rect.top
@@ -630,6 +856,7 @@ const GraphCanvas = React.forwardRef(function GraphCanvas(props, ref) {
     // preventDefault stops the browser from starting a text selection while
     // panning (user-select: none on .pg-canvas is the CSS backstop).
     e.preventDefault()
+    if (props.onCanvasInteract) props.onCanvasInteract()
     dragRef.current = { x: e.clientX, y: e.clientY, vx: props.view.x, vy: props.view.y }
   }
   const onMouseMove = (e) => {
@@ -662,7 +889,15 @@ const GraphCanvas = React.forwardRef(function GraphCanvas(props, ref) {
         graph.nodes.map((n) => React.createElement('foreignObject', {
           key: n.id, x: n.x, y: n.y, width: n.w || 210, height: n.h || 76,
         },
-          React.createElement(NodeCard, { node: n, selected: n.id === props.selectedId, t: props.t, onSelect: props.onSelect }),
+          React.createElement(NodeCard, {
+            node: n, selected: n.id === props.selectedId, flashId: props.flashId,
+            t: props.t, onSelect: props.onSelect,
+            onContextMenu: props.onContextMenu,
+            onDragStart: props.onDragStart,
+            onDragMove: props.onDragMove,
+            onDragEnd: props.onDragEnd,
+            onFlashEnd: props.onFlashEnd,
+          }),
         )),
       ),
     ),
@@ -826,10 +1061,66 @@ function HorizontalScrollbar(props) {
   }))
 }
 
+/** Fixed-position node context menu, clamped to the viewport by the caller. */
+function ContextMenu(props) {
+  const items = props.items || []
+  return React.createElement('div', {
+    className: 'pg-context-menu',
+    style: { left: props.x + 'px', top: props.y + 'px' },
+    role: 'menu',
+    onMouseDown: (e) => e.stopPropagation(),
+  },
+    items.map((it, i) => it.enabled === false
+      ? null
+      : React.createElement('button', {
+        key: i, type: 'button', className: 'pg-menu-item', role: 'menuitem',
+        onClick: () => { props.onClose(); it.onClick() },
+      }, it.label)),
+  )
+}
+
+/** Dropdown favorites panel: colored kind tiles + summary + locate pin. */
+function FavoritePopover(props) {
+  const items = props.items || []
+  const t = props.t
+  const nodeById = props.nodeById
+  const locatedId = props.locatedId
+  return React.createElement('div', { className: 'pg-favorites-popover' },
+    items.length === 0
+      ? React.createElement('div', { className: 'pg-favorite-empty' }, t('favorite.empty'))
+      : items.map((item) => {
+        const node = nodeById.get(item.id)
+        const kind = node ? (TYPE_GLYPHS[node.type] || '?') : 'F'
+        const color = nodeAccent(node)
+        const summary = node && node.summary ? node.summary : item.label
+        const located = item.id === locatedId
+        return React.createElement('div', {
+          key: item.id,
+          role: 'button',
+          tabIndex: 0,
+          className: 'pg-favorite-row' + (located ? ' pg-favorite-row-selected' : ''),
+          style: { '--pg-favorite-color': color },
+          onClick: () => props.onSelect(item),
+        },
+          React.createElement('span', { className: 'pg-favorite-kind' }, kind),
+          React.createElement('span', { className: 'pg-favorite-summary' }, summary),
+          React.createElement('span', { className: 'pg-favorite-time' }, formatSystemTime(item.time)),
+          located ? React.createElement('span', { className: 'pg-favorite-locator', 'aria-hidden': true },
+            React.createElement('span', { className: 'pg-favorite-locator-dot' })) : null,
+        )
+      }),
+  )
+}
+
 function PlanGraphView(props) {
   const useSession = props.useSession
   const toggleStore = props.toggleStore
   const turnStore = props.turnStore
+  const embedStore = props.embedStore
+  const layout = props.layout
+  const locator = props.locator
+  const chatLocate = props.chatLocate
+  const sessionId = props.sessionId
   const t = props.t
   const embedded = !!props.embedded
   const sidebar = !!props.sidebar
@@ -843,14 +1134,46 @@ function PlanGraphView(props) {
   const [viewportWidth, setViewportWidth] = React.useState(1200)
   const [viewportHeight, setViewportHeight] = React.useState(700)
   const [followLatest, setFollowLatest] = React.useState(false)
+  const [flashId, setFlashId] = React.useState(null)
+  const [favoritesOpen, setFavoritesOpen] = React.useState(false)
+  const [favItems, setFavItems] = React.useState([])
+  const [menu, setMenu] = React.useState(null)
+  const [drag, setDrag] = React.useState(null)
+  const favStoreRef = React.useRef(null)
+  const favoriteControlRef = React.useRef(null)
   const canvasRef = React.useRef(null)
+  if (favStoreRef.current === null || favStoreRef.current.sessionId !== sessionId) {
+    favStoreRef.current = { sessionId, store: makeFavStore(sessionId) }
+  }
+  const favStore = favStoreRef.current.store
   React.useEffect(() => toggleStore.subscribe(() => setHideTools(toggleStore.get())), [])
   React.useEffect(() => turnStore.subscribe(() => setGroupByTurn(turnStore.get())), [])
+  React.useEffect(() => {
+    setFavItems(favStore.get())
+    return favStore.subscribe(() => setFavItems(favStore.get()))
+  }, [favStore])
+  React.useEffect(() => {
+    if (!menu) return undefined
+    const close = () => setMenu(null)
+    const onKey = (e) => { if (e.key === 'Escape') close() }
+    if (typeof window === 'undefined') return undefined
+    window.addEventListener('mousedown', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [menu])
   const graph = React.useMemo(() => {
     const projected = projectSnapshot(snapshot, hideTools)
     if (!groupByTurn) return layoutGraph(projected)
     return layoutTurnGraph(buildTurnGraph(projected, expandedTurns))
   }, [snapshot, hideTools, groupByTurn, expandedTurns])
+  const nodeById = React.useMemo(() => {
+    const map = new Map()
+    for (const n of graph.nodes) map.set(n.id, n)
+    return map
+  }, [graph])
   React.useEffect(() => {
     const el = canvasRef.current
     if (!el) return
@@ -904,6 +1227,104 @@ function PlanGraphView(props) {
       setSelectedId(id)
     }
   }
+  const locateInGraph = (id) => {
+    const node = graph.nodes.find((n) => n.id === id)
+    const el = canvasRef.current
+    if (!node || !el) return
+    const cw = el.clientWidth || 1200
+    const ch = el.clientHeight || 700
+    setView((current) => ({
+      scale: Math.max(current.scale, 1),
+      x: cw / 2 - (node.x + (node.w || 210) / 2) * current.scale,
+      y: ch / 2 - (node.y + (node.h || 76) / 2) * current.scale,
+    }))
+    setFlashId(id)
+  }
+  const locateChatRow = (key, onTimeout) => {
+    // The chat view only mounts while it is the active view; entering the
+    // merged layout gives the conversation page room and the user a path to it.
+    if (!embedded && layout && typeof layout.openDetails === 'function') {
+      if (embedStore && typeof embedStore.setEmbedded === 'function') {
+        embedStore.setEmbedded(sessionId, true)
+      }
+      layout.openDetails()
+    }
+    if (locator && typeof locator.flash === 'function') {
+      locator.flash(key, onTimeout || (() => {}))
+    }
+  }
+  const locateInChat = (callId) => {
+    if (chatLocate && typeof chatLocate.locate === 'function') {
+      try { chatLocate.locate(callId); return } catch (e) {}
+    }
+    const key = nodeKeyByCallId(snapshot, callId)
+    if (key == null) { locateInGraph(callId); return }
+    locateChatRow(key, () => locateInGraph(callId))
+  }
+  // Favorites entries can outlive their node: a partial assistant finishes,
+  // or a windowed node pages out. Fall back to the chat row by seq/callId.
+  const locateFavorite = (item) => {
+    if (!item) return
+    if (graph.nodes.some((n) => n.id === item.id)) { locateInGraph(item.id); return }
+    if (item.callId) { locateInChat(item.callId); return }
+    if (item.seq != null) {
+      const key = nodeKeyByAssistantSeq(snapshot, item.seq)
+      if (key != null) { locateChatRow(key, null); return }
+    }
+    // Nothing reachable in the current window — silent.
+  }
+  const toggleFavorite = (node) => {
+    if (!node) return
+    if (favStore.has(node.id)) { favStore.remove(node.id); return }
+    favStore.add({
+      id: node.id,
+      callId: node.callId || null,
+      seq: node.seq != null ? node.seq : null,
+      label: nodeTitle(node, t),
+      time: node.time || (typeof Date.now === 'function' ? Date.now() : 0),
+    })
+  }
+  const copyNodeInfo = (node) => {
+    if (!node) return
+    const info = {
+      id: node.id, kind: node.kind, type: node.type, status: node.status,
+      title: nodeTitle(node, t), callId: node.callId || null,
+      seq: node.seq != null ? node.seq : null, time: node.time != null ? node.time : null,
+    }
+    if (typeof navigator !== 'undefined' && navigator.clipboard
+      && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(JSON.stringify(info, null, 2)).catch(() => {})
+    }
+  }
+  const openMenu = (e, node) => {
+    const vw = typeof window !== 'undefined' ? window.innerWidth : 1200
+    const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+    const items = []
+    items.push({
+      label: favStore.has(node.id) ? t('favorite.remove') : t('favorite.add'),
+      onClick: () => toggleFavorite(node),
+    })
+    // Locate-in-chat (F3) sits right below the favorites toggle; only
+    // tool-call nodes carry a callId that can map to a chat row.
+    if (node.callId) items.push({ label: t('menu.locateChat'), onClick: () => locateInChat(node.callId) })
+    items.push({ label: t('menu.copyInfo'), onClick: () => copyNodeInfo(node) })
+    items.push({ label: t('menu.viewDetails'), onClick: () => setSelectedId(node.id) })
+    setMenu({ x: Math.min(e.clientX, vw - 190), y: Math.min(e.clientY, vh - 170), items, nodeId: node.id })
+  }
+  const onDragStart = (id) => setDrag({ id, x: 0, y: 0 })
+  const onDragMove = (x, y) => setDrag((d) => (d ? { id: d.id, x, y } : d))
+  const onDragEnd = (id, x, y) => {
+    const control = favoriteControlRef.current
+    setDrag(null)
+    if (!control) return
+    let r = null
+    try { r = control.getBoundingClientRect() } catch (e) {}
+    if (!r) return
+    if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+      const node = graph.nodes.find((n) => n.id === id)
+      if (node) toggleFavorite(node)
+    }
+  }
   const turnCount = groupByTurn ? graph.nodes.filter((n) => n.type === 'turn').length : 0
   const contentWidth = graph.width * view.scale
   const contentHeight = graph.height * view.scale
@@ -916,7 +1337,16 @@ function PlanGraphView(props) {
         React.createElement('div', null, t('empty.title')),
         React.createElement('div', null, t('empty.hint')))
     : React.createElement('div', { className: 'pg-canvas-wrap' },
-        React.createElement(GraphCanvas, { ref: canvasRef, graph, view, onView: setView, selectedId, onSelect: handleNodeClick, t }),
+        React.createElement(GraphCanvas, {
+          ref: canvasRef, graph, view, onView: setView, selectedId, flashId,
+          onSelect: handleNodeClick, t,
+          onContextMenu: openMenu,
+          onCanvasInteract: () => setMenu(null),
+          onDragStart,
+          onDragMove,
+          onDragEnd,
+          onFlashEnd: () => setFlashId(null),
+        }),
         // Turn-fold mode lays expanded members out horizontally, so a bottom
         // rail scrolls the band without drag-panning.
         groupByTurn ? React.createElement(HorizontalScrollbar, {
@@ -947,6 +1377,14 @@ function PlanGraphView(props) {
       React.createElement('button', { className: 'pg-btn' + (followLatest ? ' pg-btn-on' : ''), title: t('toolbar.followLatest'), onClick: () => setFollowLatest((v) => !v) },
         (followLatest ? '✓ ' : '') + t('toolbar.followLatest')),
       React.createElement('button', { className: 'pg-btn pg-btn-embed' + (embedded ? ' pg-btn-on' : ''), title: embedLabel, onClick: () => onEmbedToggle(!embedded) }, embedLabel),
+      React.createElement('div', { className: 'pg-favorites-control' + (drag ? ' pg-favorites-drop' : ''), ref: favoriteControlRef },
+        React.createElement('button', {
+          className: 'pg-btn' + (favoritesOpen ? ' pg-btn-on' : ''),
+          type: 'button',
+          title: t('favorite.openPanel'),
+          onClick: () => setFavoritesOpen((open) => !open),
+        }, (favoritesOpen ? '✓ ' : '') + t('favorite.bar').replace('{n}', String(favItems.length))),
+      ),
       React.createElement('span', { className: 'pg-count' },
         groupByTurn
           ? t('toolbar.turns').replace('{n}', String(turnCount))
@@ -954,8 +1392,24 @@ function PlanGraphView(props) {
     ),
     React.createElement('div', { className: 'pg-body' },
       canvasArea,
-      React.createElement(DetailPanel, { node: selected, t, onClose: () => setSelectedId(null) }),
+      React.createElement(DetailPanel, {
+        node: selected,
+        t,
+        onClose: () => setSelectedId(null),
+      }),
     ),
+    favoritesOpen ? React.createElement(FavoritePopover, {
+      t,
+      items: favItems,
+      nodeById,
+      locatedId: flashId,
+      onSelect: (item) => locateFavorite(item),
+    }) : null,
+    menu ? React.createElement(ContextMenu, {
+      x: menu.x, y: menu.y, items: menu.items,
+      onClose: () => setMenu(null),
+    }) : null,
+    drag ? React.createElement('div', { className: 'pg-drag-ghost', style: { left: drag.x + 'px', top: drag.y + 'px' } }, t('favorite.dragHint')) : null,
   )
 }
 
@@ -1039,7 +1493,7 @@ function MergedScreen(props) {
 
 /** The 'plan-graph' conversation.view occupant: full graph, or merged-screen while embedded. */
 function PlanGraphTab(props) {
-  const { sessionId, useSession, toggleStore, turnStore, embedStore, t, layout } = props
+  const { sessionId, useSession, toggleStore, turnStore, embedStore, layout, locator, chatLocate, t } = props
   const [embedded, setEmbedded] = React.useState(() => embedStore.isEmbedded(sessionId))
   React.useEffect(() => embedStore.subscribe(() => setEmbedded(embedStore.isEmbedded(sessionId))), [sessionId])
   if (embedded) {
@@ -1052,7 +1506,7 @@ function PlanGraphTab(props) {
     })
   }
   return React.createElement(PlanGraphView, {
-    useSession, toggleStore, turnStore, t,
+    useSession, toggleStore, turnStore, embedStore, layout, locator, chatLocate, sessionId, t,
     embedded: false,
     onEmbedToggle: () => {
       embedStore.setEmbedded(sessionId, true)
@@ -1063,7 +1517,7 @@ function PlanGraphTab(props) {
 
 /** The right details column occupant: plan graph while embedded, otherwise tool details / empty. */
 function PlanGraphDetails(props) {
-  const { sessionId, useSession, toggleStore, turnStore, embedStore, t, layout, interval } = props
+  const { sessionId, useSession, toggleStore, turnStore, embedStore, layout, locator, chatLocate, interval, t } = props
   const snapshot = useSession((s) => s)
   const [embedded, setEmbedded] = React.useState(() => embedStore.isEmbedded(sessionId))
   const [selection, setSelection] = React.useState(null)
@@ -1096,7 +1550,7 @@ function PlanGraphDetails(props) {
   if (sessionId === undefined) return null
   if (embedded) {
     return React.createElement(PlanGraphView, {
-      useSession, toggleStore, turnStore, t,
+      useSession, toggleStore, turnStore, embedStore, layout, locator, chatLocate, sessionId, t,
       embedded: true,
       sidebar: true,
       onEmbedToggle: () => {
@@ -1150,6 +1604,17 @@ const EN_DICT = {
   'detail.notInWindow': 'This call is no longer in the current window.',
   'detail.toolRunning': 'Running…',
   'detail.close': 'Close details',
+  'favorite.bar': 'Favorites ({n})',
+  'favorite.openPanel': 'Toggle favorites panel',
+  'favorite.closePanel': 'Collapse favorites panel',
+  'favorite.add': 'Add to favorites',
+  'favorite.remove': 'Remove from favorites',
+  'favorite.empty': 'No favorites yet — right-click a node or drag it onto this button.',
+  'favorite.dragHint': 'Drop to favorite',
+  'menu.locateChat': 'Locate in conversation',
+  'menu.locateGraph': 'Locate in graph',
+  'menu.copyInfo': 'Copy node info',
+  'menu.viewDetails': 'View details',
 }
 
 const ZH_DICT = {
@@ -1185,11 +1650,22 @@ const ZH_DICT = {
   'detail.notInWindow': '该调用已不在当前窗口。',
   'detail.toolRunning': '运行中…',
   'detail.close': '关闭详情',
+  'favorite.bar': '收藏夹 ({n})',
+  'favorite.openPanel': '展开/收起收藏夹面板',
+  'favorite.closePanel': '收起收藏夹面板',
+  'favorite.add': '加入收藏夹',
+  'favorite.remove': '移出收藏夹',
+  'favorite.empty': '收藏夹为空 — 右键节点或拖到该按钮上添加。',
+  'favorite.dragHint': '拖到此处收藏',
+  'menu.locateChat': '定位至对话区',
+  'menu.locateGraph': '定位到图内',
+  'menu.copyInfo': '复制节点信息',
+  'menu.viewDetails': '查看详情',
 }
 
 const PG_CSS = `
 .pg-root { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; color: var(--dsw-alias-label-primary); background: var(--dsw-alias-bg-base); font: 13px/1.4 system-ui, sans-serif; }
-.pg-toolbar { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: none; flex-wrap: wrap; }
+.pg-toolbar { position: relative; z-index: 5; display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); flex: none; flex-wrap: wrap; }
 .pg-title { font-weight: 600; font-size: 13px; }
 .pg-btn { border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 12px; }
 .pg-btn:hover { border-color: var(--dsw-alias-brand-primary); }
@@ -1212,6 +1688,8 @@ const PG_CSS = `
 .pg-node { box-sizing: border-box; width: 210px; height: 76px; border: 1px solid var(--dsw-alias-border-l2); border-left: 3px solid var(--pg-color); border-radius: 7px; background: var(--dsw-alias-bg-layer-1); padding: 7px 9px 6px; display: flex; flex-direction: column; gap: 3px; cursor: pointer; overflow: hidden; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08); transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease; }
 .pg-node:hover { border-color: var(--pg-color); box-shadow: 0 3px 10px rgba(15, 23, 42, 0.14); transform: translateY(-1px); }
 .pg-node-selected { border-color: var(--pg-color); box-shadow: 0 0 0 2px color-mix(in srgb, var(--pg-color) 28%, transparent), 0 3px 10px rgba(15, 23, 42, 0.14); }
+.pg-node-flash { border-color: var(--pg-color); box-shadow: 0 0 0 3px var(--pg-color), 0 0 18px color-mix(in srgb, var(--pg-color) 60%, transparent); animation: pg-flash-pulse 0.6s ease-in-out 2; }
+@keyframes pg-flash-pulse { 0% { box-shadow: 0 0 0 3px var(--pg-color); } 50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--pg-color) 70%, transparent); } 100% { box-shadow: 0 0 0 3px var(--pg-color); } }
 .pg-node-turn { width: 190px; height: 54px; padding: 6px 9px; background: var(--dsw-alias-bg-layer-2); }
 .pg-node-assistant { background: color-mix(in srgb, #8b5cf6 5%, var(--dsw-alias-bg-layer-1)); }
 .pg-node-user { background: color-mix(in srgb, #3b82f6 5%, var(--dsw-alias-bg-layer-1)); }
@@ -1240,6 +1718,28 @@ const PG_CSS = `
 .pg-block { margin-top: 10px; }
 .pg-block h4 { margin: 0 0 4px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
 .pg-pre { background: var(--dsw-alias-bg-base); border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px; padding: 8px; font: 11px/1.5 ui-monospace, monospace; white-space: pre-wrap; word-break: break-word; max-height: 40vh; overflow: auto; margin: 0; }
+.pg-favorites-control { position: relative; }
+.pg-favorites-drop { outline: 2px solid var(--dsw-alias-brand-primary); border-radius: 6px; }
+.pg-favorites-popover { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); width: min(680px, calc(100% - 24px)); border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 12px 30px rgba(15, 23, 42, 0.18); overflow: hidden; z-index: 8; max-height: 60vh; overflow-y: auto; }
+.pg-favorite-empty { color: var(--dsw-alias-label-secondary); font-size: 12px; text-align: center; padding: 18px 12px; }
+.pg-favorite-row { position: relative; box-sizing: border-box; width: 100%; min-height: 58px; border: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); padding: 0 52px 0 0; display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: stretch; text-align: left; cursor: pointer; }
+.pg-favorite-row:last-child { border-bottom: 0; }
+.pg-favorite-row:hover { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 8%, var(--dsw-alias-bg-layer-1)); }
+.pg-favorite-row-selected { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, var(--dsw-alias-bg-layer-1)); }
+.pg-favorite-kind { display: flex; align-items: center; justify-content: center; background: var(--pg-favorite-color); color: #fff; font-size: 17px; font-weight: 700; }
+.pg-favorite-summary { min-width: 0; align-self: center; padding: 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.pg-favorite-time { align-self: center; flex: none; color: var(--dsw-alias-label-secondary); font-size: 11px; font-variant-numeric: tabular-nums; padding-right: 8px; }
+.pg-favorite-locator { position: absolute; right: 13px; top: 50%; width: 25px; height: 25px; transform: translateY(-50%); box-sizing: border-box; border: 2px solid var(--pg-favorite-color); border-radius: 50%; }
+.pg-favorite-locator::before, .pg-favorite-locator::after { content: ''; position: absolute; background: var(--pg-favorite-color); }
+.pg-favorite-locator::before { left: 50%; top: -4px; width: 2px; height: 31px; transform: translateX(-50%); clip-path: polygon(0 0, 100% 0, 100% 4px, 0 4px, 0 27px, 100% 27px, 100% 31px, 0 31px); }
+.pg-favorite-locator::after { top: 50%; left: -4px; width: 31px; height: 2px; transform: translateY(-50%); clip-path: polygon(0 0, 4px 0, 4px 100%, 27px 100%, 27px 0, 31px 0, 31px 100%, 0 100%); }
+.pg-favorite-locator-dot { position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; transform: translate(-50%, -50%); border-radius: 2px; background: var(--pg-favorite-color); }
+.pg-context-menu { position: fixed; z-index: 1000; min-width: 180px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2); padding: 4px; }
+.pg-menu-item { display: block; width: 100%; box-sizing: border-box; text-align: left; border: 0; background: none; color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 1; padding: 8px 10px; border-radius: 5px; cursor: pointer; }
+.pg-menu-item:hover { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 10%, transparent); }
+.pg-drag-ghost { position: fixed; z-index: 1001; transform: translate(-50%, -50%); pointer-events: none; padding: 5px 10px; border: 1px solid var(--dsw-alias-brand-primary); border-radius: 6px; background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); font-size: 12px; box-shadow: 0 6px 18px rgba(15, 23, 42, 0.18); }
+.pg-locate-flash { outline: 3px solid var(--dsw-alias-brand-primary); outline-offset: 2px; animation: pg-locate-pulse 0.6s ease-in-out 2; border-radius: 4px; }
+@keyframes pg-locate-pulse { 0% { outline-color: var(--dsw-alias-brand-primary); } 50% { outline-color: #f5b301; } 100% { outline-color: var(--dsw-alias-brand-primary); } }
 .pg-root-embedded .pg-body { flex-direction: column; }
 .pg-root-embedded .pg-detail { width: auto; max-height: 42%; min-height: 150px; border-left: none; border-top: 1px solid var(--dsw-alias-border-l1); }
 .pg-detail-column { width: auto; border-left: none; height: 100%; box-sizing: border-box; }
@@ -1303,6 +1803,9 @@ return {
     const layout = ctx.get('layout')
     const timer = ctx.get('timer')
     const interval = timer ? ((fn, ms) => timer.interval(fn, ms)) : null
+    const locator = createLocator(timer)
+    const chatLocate = ctx.get('chatLocate')
+    ctx.effect(() => locator.dispose, 'plan-graph: locator')
 
     const locale = ctx.get('locale')
     // Unique per-apply namespace: the locale registry is process-wide and a
@@ -1327,6 +1830,10 @@ return {
             if (node == null) return true
             return node.kind !== 'tool-call'
           },
+          // The chat view subscribes to visibility changes; without this the
+          // whole chat render throws ("subscribe is not a function") and the
+          // conversation page goes blank when switching back to Chat.
+          subscribe: (fn) => toggleStore.subscribe(fn),
         })
       } catch (e) {
         console.log('[plan-graph] chatNodeVisibility already provided; skipped')
@@ -1340,6 +1847,7 @@ return {
         name: 'conversation.view',
         id: 'plan-graph',
         order: 20,
+        priority: -1,
         label: () => t('view.planGraph'),
       }, (props) => React.createElement(PlanGraphTab, {
         useSession: props ? props.useSession : undefined,
@@ -1348,6 +1856,8 @@ return {
         turnStore,
         embedStore,
         layout,
+        locator,
+        chatLocate,
         t,
       })))
 
@@ -1369,6 +1879,8 @@ return {
             turnStore,
             embedStore,
             layout,
+            locator,
+            chatLocate,
             interval,
             t,
           })))
