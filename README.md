@@ -1,4 +1,4 @@
-https://github.com/HR2AY/diary/blob/main/1.png
+![8/16更新](https://github.com/HR2AY/diary/blob/main/1.png)
 
 # dsh-plan-graph
 
