@@ -1,3 +1,5 @@
+https://github.com/HR2AY/diary/blob/main/1.png
+
 # dsh-plan-graph
 
 An out-of-tree [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin bundle: an interactive flow graph of a session's tool calls and messages, rendered client-side from the conversation snapshot. The plugin adds a "Plan Graph" tab to the session view ring (pan/zoom canvas, status-colored node cards, node details, hide-tool-calls and group-by-turn toggles, follow latest, and "Merge into conversation" into the real right sidebar).
