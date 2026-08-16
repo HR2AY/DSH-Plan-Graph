@@ -37,6 +37,11 @@ window.__ModuleLoader__.load({ id: "dsh-plan-graph", factory: (require) => {
  * React.createElement, and guarded localStorage for toggles and favorites.
  *
  * Changelog:
+ * - pkg-11: 定位至对话区 now works for every node kind, not just tool calls —
+ *   assistant rows map by data.finalNode.seq, user/steering/context rows by
+ *   data.seq (the same event seq the graph node id embeds); the context-menu
+ *   item is shown for all nodes and falls back to in-graph locate when no
+ *   chat row is reachable.
  * - pkg-10: drop the locate-pin icon (pg-favorite-locator) from favorites
  *   panel rows; the entry no longer highlights the last-located item.
  * - pkg-9: drop the 定位到图内 context-menu item and the details-panel ★
@@ -192,17 +197,23 @@ function nodeKeyByCallId(snapshot, callId) {
   return null
 }
 
-/** Map an assistant message seq to its chat row key (finalNode.seq mirrors the graph node seq). */
-function nodeKeyByAssistantSeq(snapshot, seq) {
+/** Map a message/assistant seq to its chat row key: assistant uses
+ *  finalNode.seq, user/steering/context carry data.seq (the same event seq the
+ *  graph node id embeds). */
+function nodeKeyBySeq(snapshot, seq) {
   if (!snapshot || !snapshot.chat || !snapshot.chat.nodes || seq == null) return null
   const store = snapshot.chat.nodes
   let values = []
   try { values = typeof store.values === 'function' ? store.values() : [] } catch (e) {}
   for (let i = 0; i < values.length; i++) {
     const node = values[i]
-    if (!node || node.kind !== 'assistant-step') continue
+    if (!node || typeof node.key !== 'string') continue
     const d = node.data
-    if (d && d.finalNode && d.finalNode.seq === seq && typeof node.key === 'string') return node.key
+    if (!d) continue
+    if (node.kind === 'assistant-step' && d.finalNode && d.finalNode.seq === seq) return node.key
+    if ((node.kind === 'user' || node.kind === 'steering' || node.kind === 'context') && d.seq === seq) {
+      return node.key
+    }
   }
   return null
 }
@@ -1265,25 +1276,30 @@ function PlanGraphView(props) {
       locator.flash(key, onTimeout || (() => {}))
     }
   }
-  const locateInChat = (callId) => {
-    if (chatLocate && typeof chatLocate.locate === 'function') {
-      try { chatLocate.locate(callId); return } catch (e) {}
+  const locateInChat = (node) => {
+    if (!node) return
+    if (chatLocate && node.callId && typeof chatLocate.locate === 'function') {
+      try { chatLocate.locate(node.callId); return } catch (e) {}
     }
-    const key = nodeKeyByCallId(snapshot, callId)
-    if (key == null) { locateInGraph(callId); return }
-    locateChatRow(key, () => locateInGraph(callId))
+    // tool-call: callId → chat row
+    if (node.callId) {
+      const key = nodeKeyByCallId(snapshot, node.callId)
+      if (key != null) { locateChatRow(key, () => locateInGraph(node.id)); return }
+    }
+    // assistant / user / steering / context: seq → chat row
+    if (node.seq != null) {
+      const key = nodeKeyBySeq(snapshot, node.seq)
+      if (key != null) { locateChatRow(key, () => locateInGraph(node.id)); return }
+    }
+    // Nothing mapped — in-graph fallback.
+    locateInGraph(node.id)
   }
   // Favorites entries can outlive their node: a partial assistant finishes,
   // or a windowed node pages out. Fall back to the chat row by seq/callId.
   const locateFavorite = (item) => {
     if (!item) return
     if (graph.nodes.some((n) => n.id === item.id)) { locateInGraph(item.id); return }
-    if (item.callId) { locateInChat(item.callId); return }
-    if (item.seq != null) {
-      const key = nodeKeyByAssistantSeq(snapshot, item.seq)
-      if (key != null) { locateChatRow(key, null); return }
-    }
-    // Nothing reachable in the current window — silent.
+    locateInChat({ id: item.id, callId: item.callId || null, seq: item.seq != null ? item.seq : null })
   }
   const toggleFavorite = (node) => {
     if (!node) return
@@ -1316,9 +1332,10 @@ function PlanGraphView(props) {
       label: favStore.has(node.id) ? t('favorite.remove') : t('favorite.add'),
       onClick: () => toggleFavorite(node),
     })
-    // Locate-in-chat (F3) sits right below the favorites toggle; only
-    // tool-call nodes carry a callId that can map to a chat row.
-    if (node.callId) items.push({ label: t('menu.locateChat'), onClick: () => locateInChat(node.callId) })
+    // Locate-in-chat (F3) sits right below the favorites toggle; every node
+    // kind maps to a chat row: tool by callId, assistant/user/steering/context
+    // by seq.
+    items.push({ label: t('menu.locateChat'), onClick: () => locateInChat(node) })
     items.push({ label: t('menu.copyInfo'), onClick: () => copyNodeInfo(node) })
     items.push({ label: t('menu.viewDetails'), onClick: () => setSelectedId(node.id) })
     setMenu({ x: Math.min(e.clientX, vw - 190), y: Math.min(e.clientY, vh - 170), items, nodeId: node.id })
