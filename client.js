@@ -37,6 +37,8 @@ window.__ModuleLoader__.load({ id: "dsh-plan-graph", factory: (require) => {
  * React.createElement, and guarded localStorage for toggles and favorites.
  *
  * Changelog:
+ * - pkg-10: drop the locate-pin icon (pg-favorite-locator) from favorites
+ *   panel rows; the entry no longer highlights the last-located item.
  * - pkg-9: drop the 定位到图内 context-menu item and the details-panel ★
  *   favorite button (favorites are managed from the context menu only);
  *   favorites entries store the node seq and clicking an entry falls back to
@@ -1093,12 +1095,11 @@ function ContextMenu(props) {
   )
 }
 
-/** Dropdown favorites panel: colored kind tiles + summary + locate pin. */
+/** Dropdown favorites panel: colored kind tiles + summary + time. */
 function FavoritePopover(props) {
   const items = props.items || []
   const t = props.t
   const nodeById = props.nodeById
-  const locatedId = props.locatedId
   return React.createElement('div', { className: 'pg-favorites-popover' },
     items.length === 0
       ? React.createElement('div', { className: 'pg-favorite-empty' }, t('favorite.empty'))
@@ -1107,20 +1108,17 @@ function FavoritePopover(props) {
         const kind = node ? (TYPE_GLYPHS[node.type] || '?') : 'F'
         const color = nodeAccent(node)
         const summary = node && node.summary ? node.summary : item.label
-        const located = item.id === locatedId
         return React.createElement('div', {
           key: item.id,
           role: 'button',
           tabIndex: 0,
-          className: 'pg-favorite-row' + (located ? ' pg-favorite-row-selected' : ''),
+          className: 'pg-favorite-row',
           style: { '--pg-favorite-color': color },
           onClick: () => props.onSelect(item),
         },
           React.createElement('span', { className: 'pg-favorite-kind' }, kind),
           React.createElement('span', { className: 'pg-favorite-summary' }, summary),
           React.createElement('span', { className: 'pg-favorite-time' }, formatSystemTime(item.time)),
-          located ? React.createElement('span', { className: 'pg-favorite-locator', 'aria-hidden': true },
-            React.createElement('span', { className: 'pg-favorite-locator-dot' })) : null,
         )
       }),
   )
@@ -1416,7 +1414,6 @@ function PlanGraphView(props) {
       t,
       items: favItems,
       nodeById,
-      locatedId: flashId,
       onSelect: (item) => locateFavorite(item),
     }) : null,
     menu ? React.createElement(ContextMenu, {
@@ -1739,15 +1736,9 @@ const PG_CSS = `
 .pg-favorite-row { position: relative; box-sizing: border-box; width: 100%; min-height: 58px; border: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); padding: 0 52px 0 0; display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: stretch; text-align: left; cursor: pointer; }
 .pg-favorite-row:last-child { border-bottom: 0; }
 .pg-favorite-row:hover { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 8%, var(--dsw-alias-bg-layer-1)); }
-.pg-favorite-row-selected { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, var(--dsw-alias-bg-layer-1)); }
 .pg-favorite-kind { display: flex; align-items: center; justify-content: center; background: var(--pg-favorite-color); color: #fff; font-size: 17px; font-weight: 700; }
 .pg-favorite-summary { min-width: 0; align-self: center; padding: 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .pg-favorite-time { align-self: center; flex: none; color: var(--dsw-alias-label-secondary); font-size: 11px; font-variant-numeric: tabular-nums; padding-right: 8px; }
-.pg-favorite-locator { position: absolute; right: 13px; top: 50%; width: 25px; height: 25px; transform: translateY(-50%); box-sizing: border-box; border: 2px solid var(--pg-favorite-color); border-radius: 50%; }
-.pg-favorite-locator::before, .pg-favorite-locator::after { content: ''; position: absolute; background: var(--pg-favorite-color); }
-.pg-favorite-locator::before { left: 50%; top: -4px; width: 2px; height: 31px; transform: translateX(-50%); clip-path: polygon(0 0, 100% 0, 100% 4px, 0 4px, 0 27px, 100% 27px, 100% 31px, 0 31px); }
-.pg-favorite-locator::after { top: 50%; left: -4px; width: 31px; height: 2px; transform: translateY(-50%); clip-path: polygon(0 0, 4px 0, 4px 100%, 27px 100%, 27px 0, 31px 0, 31px 100%, 0 100%); }
-.pg-favorite-locator-dot { position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; transform: translate(-50%, -50%); border-radius: 2px; background: var(--pg-favorite-color); }
 .pg-context-menu { position: fixed; z-index: 1000; min-width: 180px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2); padding: 4px; }
 .pg-menu-item { display: block; width: 100%; box-sizing: border-box; text-align: left; border: 0; background: none; color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 1; padding: 8px 10px; border-radius: 5px; cursor: pointer; }
 .pg-menu-item:hover { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 10%, transparent); }
