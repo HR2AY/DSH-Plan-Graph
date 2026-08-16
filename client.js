@@ -37,6 +37,13 @@ window.__ModuleLoader__.load({ id: "dsh-plan-graph", factory: (require) => {
  * React.createElement, and guarded localStorage for toggles and favorites.
  *
  * Changelog:
+ * - pkg-11: 定位至对话区 now works for every node kind, not just tool calls —
+ *   assistant rows map by data.finalNode.seq, user/steering/context rows by
+ *   data.seq (the same event seq the graph node id embeds); the context-menu
+ *   item is shown for all nodes and falls back to in-graph locate when no
+ *   chat row is reachable.
+ * - pkg-10: drop the locate-pin icon (pg-favorite-locator) from favorites
+ *   panel rows; the entry no longer highlights the last-located item.
  * - pkg-9: drop the 定位到图内 context-menu item and the details-panel ★
  *   favorite button (favorites are managed from the context menu only);
  *   favorites entries store the node seq and clicking an entry falls back to
@@ -190,17 +197,23 @@ function nodeKeyByCallId(snapshot, callId) {
   return null
 }
 
-/** Map an assistant message seq to its chat row key (finalNode.seq mirrors the graph node seq). */
-function nodeKeyByAssistantSeq(snapshot, seq) {
+/** Map a message/assistant seq to its chat row key: assistant uses
+ *  finalNode.seq, user/steering/context carry data.seq (the same event seq the
+ *  graph node id embeds). */
+function nodeKeyBySeq(snapshot, seq) {
   if (!snapshot || !snapshot.chat || !snapshot.chat.nodes || seq == null) return null
   const store = snapshot.chat.nodes
   let values = []
   try { values = typeof store.values === 'function' ? store.values() : [] } catch (e) {}
   for (let i = 0; i < values.length; i++) {
     const node = values[i]
-    if (!node || node.kind !== 'assistant-step') continue
+    if (!node || typeof node.key !== 'string') continue
     const d = node.data
-    if (d && d.finalNode && d.finalNode.seq === seq && typeof node.key === 'string') return node.key
+    if (!d) continue
+    if (node.kind === 'assistant-step' && d.finalNode && d.finalNode.seq === seq) return node.key
+    if ((node.kind === 'user' || node.kind === 'steering' || node.kind === 'context') && d.seq === seq) {
+      return node.key
+    }
   }
   return null
 }
@@ -1093,12 +1106,11 @@ function ContextMenu(props) {
   )
 }
 
-/** Dropdown favorites panel: colored kind tiles + summary + locate pin. */
+/** Dropdown favorites panel: colored kind tiles + summary + time. */
 function FavoritePopover(props) {
   const items = props.items || []
   const t = props.t
   const nodeById = props.nodeById
-  const locatedId = props.locatedId
   return React.createElement('div', { className: 'pg-favorites-popover' },
     items.length === 0
       ? React.createElement('div', { className: 'pg-favorite-empty' }, t('favorite.empty'))
@@ -1107,20 +1119,17 @@ function FavoritePopover(props) {
         const kind = node ? (TYPE_GLYPHS[node.type] || '?') : 'F'
         const color = nodeAccent(node)
         const summary = node && node.summary ? node.summary : item.label
-        const located = item.id === locatedId
         return React.createElement('div', {
           key: item.id,
           role: 'button',
           tabIndex: 0,
-          className: 'pg-favorite-row' + (located ? ' pg-favorite-row-selected' : ''),
+          className: 'pg-favorite-row',
           style: { '--pg-favorite-color': color },
           onClick: () => props.onSelect(item),
         },
           React.createElement('span', { className: 'pg-favorite-kind' }, kind),
           React.createElement('span', { className: 'pg-favorite-summary' }, summary),
           React.createElement('span', { className: 'pg-favorite-time' }, formatSystemTime(item.time)),
-          located ? React.createElement('span', { className: 'pg-favorite-locator', 'aria-hidden': true },
-            React.createElement('span', { className: 'pg-favorite-locator-dot' })) : null,
         )
       }),
   )
@@ -1267,25 +1276,30 @@ function PlanGraphView(props) {
       locator.flash(key, onTimeout || (() => {}))
     }
   }
-  const locateInChat = (callId) => {
-    if (chatLocate && typeof chatLocate.locate === 'function') {
-      try { chatLocate.locate(callId); return } catch (e) {}
+  const locateInChat = (node) => {
+    if (!node) return
+    if (chatLocate && node.callId && typeof chatLocate.locate === 'function') {
+      try { chatLocate.locate(node.callId); return } catch (e) {}
     }
-    const key = nodeKeyByCallId(snapshot, callId)
-    if (key == null) { locateInGraph(callId); return }
-    locateChatRow(key, () => locateInGraph(callId))
+    // tool-call: callId → chat row
+    if (node.callId) {
+      const key = nodeKeyByCallId(snapshot, node.callId)
+      if (key != null) { locateChatRow(key, () => locateInGraph(node.id)); return }
+    }
+    // assistant / user / steering / context: seq → chat row
+    if (node.seq != null) {
+      const key = nodeKeyBySeq(snapshot, node.seq)
+      if (key != null) { locateChatRow(key, () => locateInGraph(node.id)); return }
+    }
+    // Nothing mapped — in-graph fallback.
+    locateInGraph(node.id)
   }
   // Favorites entries can outlive their node: a partial assistant finishes,
   // or a windowed node pages out. Fall back to the chat row by seq/callId.
   const locateFavorite = (item) => {
     if (!item) return
     if (graph.nodes.some((n) => n.id === item.id)) { locateInGraph(item.id); return }
-    if (item.callId) { locateInChat(item.callId); return }
-    if (item.seq != null) {
-      const key = nodeKeyByAssistantSeq(snapshot, item.seq)
-      if (key != null) { locateChatRow(key, null); return }
-    }
-    // Nothing reachable in the current window — silent.
+    locateInChat({ id: item.id, callId: item.callId || null, seq: item.seq != null ? item.seq : null })
   }
   const toggleFavorite = (node) => {
     if (!node) return
@@ -1318,9 +1332,10 @@ function PlanGraphView(props) {
       label: favStore.has(node.id) ? t('favorite.remove') : t('favorite.add'),
       onClick: () => toggleFavorite(node),
     })
-    // Locate-in-chat (F3) sits right below the favorites toggle; only
-    // tool-call nodes carry a callId that can map to a chat row.
-    if (node.callId) items.push({ label: t('menu.locateChat'), onClick: () => locateInChat(node.callId) })
+    // Locate-in-chat (F3) sits right below the favorites toggle; every node
+    // kind maps to a chat row: tool by callId, assistant/user/steering/context
+    // by seq.
+    items.push({ label: t('menu.locateChat'), onClick: () => locateInChat(node) })
     items.push({ label: t('menu.copyInfo'), onClick: () => copyNodeInfo(node) })
     items.push({ label: t('menu.viewDetails'), onClick: () => setSelectedId(node.id) })
     setMenu({ x: Math.min(e.clientX, vw - 190), y: Math.min(e.clientY, vh - 170), items, nodeId: node.id })
@@ -1416,7 +1431,6 @@ function PlanGraphView(props) {
       t,
       items: favItems,
       nodeById,
-      locatedId: flashId,
       onSelect: (item) => locateFavorite(item),
     }) : null,
     menu ? React.createElement(ContextMenu, {
@@ -1739,15 +1753,9 @@ const PG_CSS = `
 .pg-favorite-row { position: relative; box-sizing: border-box; width: 100%; min-height: 58px; border: 0; border-bottom: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary); padding: 0 52px 0 0; display: grid; grid-template-columns: 96px minmax(0, 1fr) auto; align-items: stretch; text-align: left; cursor: pointer; }
 .pg-favorite-row:last-child { border-bottom: 0; }
 .pg-favorite-row:hover { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 8%, var(--dsw-alias-bg-layer-1)); }
-.pg-favorite-row-selected { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 14%, var(--dsw-alias-bg-layer-1)); }
 .pg-favorite-kind { display: flex; align-items: center; justify-content: center; background: var(--pg-favorite-color); color: #fff; font-size: 17px; font-weight: 700; }
 .pg-favorite-summary { min-width: 0; align-self: center; padding: 0 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
 .pg-favorite-time { align-self: center; flex: none; color: var(--dsw-alias-label-secondary); font-size: 11px; font-variant-numeric: tabular-nums; padding-right: 8px; }
-.pg-favorite-locator { position: absolute; right: 13px; top: 50%; width: 25px; height: 25px; transform: translateY(-50%); box-sizing: border-box; border: 2px solid var(--pg-favorite-color); border-radius: 50%; }
-.pg-favorite-locator::before, .pg-favorite-locator::after { content: ''; position: absolute; background: var(--pg-favorite-color); }
-.pg-favorite-locator::before { left: 50%; top: -4px; width: 2px; height: 31px; transform: translateX(-50%); clip-path: polygon(0 0, 100% 0, 100% 4px, 0 4px, 0 27px, 100% 27px, 100% 31px, 0 31px); }
-.pg-favorite-locator::after { top: 50%; left: -4px; width: 31px; height: 2px; transform: translateY(-50%); clip-path: polygon(0 0, 4px 0, 4px 100%, 27px 100%, 27px 0, 31px 0, 31px 100%, 0 100%); }
-.pg-favorite-locator-dot { position: absolute; left: 50%; top: 50%; width: 7px; height: 7px; transform: translate(-50%, -50%); border-radius: 2px; background: var(--pg-favorite-color); }
 .pg-context-menu { position: fixed; z-index: 1000; min-width: 180px; border: 1px solid var(--dsw-alias-border-l2); border-radius: 8px; background: var(--dsw-alias-bg-layer-1); box-shadow: 0 12px 30px rgba(15, 23, 42, 0.2); padding: 4px; }
 .pg-menu-item { display: block; width: 100%; box-sizing: border-box; text-align: left; border: 0; background: none; color: var(--dsw-alias-label-primary); font-size: 12px; line-height: 1; padding: 8px 10px; border-radius: 5px; cursor: pointer; }
 .pg-menu-item:hover { background: color-mix(in srgb, var(--dsw-alias-label-secondary) 10%, transparent); }
